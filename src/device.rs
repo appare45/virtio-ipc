@@ -48,11 +48,11 @@ impl DeviceVirtq {
     /// device_take_available で取得済みのスロットに対して呼ぶ。
     pub fn device_complete(&mut self) {
         let d = self.desc_at(self.next);
-        // §2.8.1: used は AVAIL == USED == device_wrap
-        let mut flags = d.flags & !(VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
-        if self.wrap {
-            flags |= VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED;
-        }
+        // §2.8.1: AVAIL == USED == device_wrap_counter
+        const WRAP_FLAGS: u16 = VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED;
+        // wrap済みの場合はAVAIL, USEDを反転させる
+        let wrap_bits = if self.wrap { WRAP_FLAGS } else { 0 };
+        let flags = (d.flags & !WRAP_FLAGS) | wrap_bits;
         fence(Ordering::Release);
         d.flags = flags;
 

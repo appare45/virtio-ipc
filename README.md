@@ -101,6 +101,26 @@ cargo run --example send_recv
 - プロセス間で使う場合は共有メモリ（`mmap` など）上にデスクリプタリングを配置してください。
 - `DriverVirtq` は `unsafe` な生ポインタを内部で保持します。ライフタイム管理は呼び出し側の責任です。
 
+## 今後の課題
+
+### `flags` フィールドのアトミック化（UB 解消・最優先）
+
+現在 `VirtqDesc.flags` は通常の `u16` フィールドであり、ドライバスレッドとデバイススレッドが同時に読み書きするためデータ競合（未定義動作）が生じる。`fence` は操作の順序を与えるが、アクセス自体のアトミック性は保証しない。
+
+改善案: `flags` を `AtomicU16` に変更し、ペイロード（addr/len/id）を書いた後に `flags.store(new_flags, Ordering::Release)`、読み側は `flags.load(Ordering::Acquire)` とする。これはフラグをメモリバリアとして兼用する VirtIO 仕様 §2.8.1 の意図にも合致する。
+
+### `DeviceVirtq.wrap` の変数名の明確化
+
+`DeviceVirtq` 内の `wrap` フィールドは available 判定に Driver Ring Wrap Counter 相当の値として使用しているが、コメントでは「Device Ring Wrap Counter」と記載されており誤解を招く。`avail_wrap` など仕様用語と対応した名前に改めると正確になる。
+
+### `&self` から `&mut VirtqDesc` を生成する API の整理
+
+`desc_at(&self)` が `&mut VirtqDesc` を返す設計は aliasing 規則上グレーな領域。`AtomicU16` 化と合わせて、フラグは `AtomicU16::load` / `store` で直接アクセスし、`&mut` の生成を避ける形に整理する。
+
+### Multi-descriptor チェーン対応（§2.8.5）
+
+現状は 1 バッファ = 1 descriptor の前提。仕様 §2.8.5 の `VIRTQ_DESC_F_NEXT` を使った複数 descriptor によるバッファチェーンには未対応。
+
 ## ライセンス
 
 MIT
