@@ -1,6 +1,6 @@
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::{Ordering, fence};
 
-use crate::{VirtqDesc, VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED};
+use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VirtqDesc};
 
 /// デバイス側。descriptor ring から available バッファを取り出し、完了を通知する。
 /// device_take_available / device_complete はデバイススレッドのみが呼ぶ。
@@ -17,7 +17,12 @@ unsafe impl Send for DeviceVirtq {}
 
 impl DeviceVirtq {
     pub fn new(desc: *mut VirtqDesc, num: usize) -> Self {
-        DeviceVirtq { num, desc, next: 0, wrap: true }
+        DeviceVirtq {
+            num,
+            desc,
+            next: 0,
+            wrap: true,
+        }
     }
 
     fn desc_at(&self, idx: u16) -> &mut VirtqDesc {

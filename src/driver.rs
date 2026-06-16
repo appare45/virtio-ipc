@@ -1,6 +1,6 @@
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::{Ordering, fence};
 
-use crate::{VirtqDesc, VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE};
+use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, VirtqDesc};
 
 /// ドライバ側。descriptor ring へのバッファ供給と回収を担う。
 ///

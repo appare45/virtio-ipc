@@ -13,5 +13,5 @@ pub struct VirtqDesc {
 
 unsafe impl Send for VirtqDesc {}
 
-pub mod driver;
 pub mod device;
+pub mod driver;
