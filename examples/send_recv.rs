@@ -1,8 +1,12 @@
 use std::thread;
 use virtio_ipc::{BufferElement, DeviceVirtq, DriverVirtq, VirtqDesc};
 
-const QUEUE_SIZE: usize = 64;
-const MSG_COUNT: usize = 1_000_000;
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 #[repr(C)]
 struct Message {
@@ -11,7 +15,10 @@ struct Message {
 }
 
 fn main() {
-    let mut desc_ring: Vec<VirtqDesc> = (0..QUEUE_SIZE)
+    let queue_size = env_usize("QUEUE_SIZE", 64);
+    let msg_count = env_usize("MSG_COUNT", 1_000_000);
+
+    let mut desc_ring: Vec<VirtqDesc> = (0..queue_size)
         .map(|_| VirtqDesc { addr: 0, len: 0, id: 0, flags: 0 })
         .collect();
 
@@ -19,16 +26,16 @@ fn main() {
 
     // デバイススレッド: available descriptorをポーリングして処理・完了通知。
     // バッファのメモリは読むだけ。解放はドライバ側の責務。
-    let mut device_vq = DeviceVirtq::new(ptr as *mut VirtqDesc, QUEUE_SIZE);
+    let mut device_vq = DeviceVirtq::new(ptr as *mut VirtqDesc, queue_size);
     let device = thread::spawn(move || {
         let mut received = 0usize;
-        while received < MSG_COUNT {
+        while received < msg_count {
             let Some((addr, _len)) = device_vq.device_take_available() else {
                 std::hint::spin_loop();
                 continue;
             };
             let msg = unsafe { &*(addr as *const Message) };
-            if received % 100_000 == 0 {
+            if received % (msg_count / 10).max(1) == 0 {
                 println!("[device] recv #{}: id={} value={:.1}", received, msg.id, msg.value);
             }
             device_vq.device_complete();
@@ -38,10 +45,10 @@ fn main() {
 
     // ドライバ（main）: 送信と回収を同じスレッド・同じ DriverVirtq で管理。
     // リング満杯のときは先に get_buffer で回収してスペースを空けてから送信する。
-    let mut driver_vq = DriverVirtq::new(ptr as *mut VirtqDesc, QUEUE_SIZE);
+    let mut driver_vq = DriverVirtq::new(ptr as *mut VirtqDesc, queue_size);
     let mut reclaimed = 0usize;
 
-    for sent in 0..MSG_COUNT {
+    for sent in 0..msg_count {
         // リング満杯なら回収してスペースを空ける（少なくとも1件回収するまで待つ）
         while driver_vq.is_full() {
             if let Some(buf) = driver_vq.get_buffer() {
@@ -54,7 +61,7 @@ fn main() {
 
         let msg = Box::new(Message { id: sent as u32, value: sent as f64 * 0.1 });
         let raw = Box::into_raw(msg);
-        if sent % 100_000 == 0 {
+        if sent % (msg_count / 10).max(1) == 0 {
             println!("[driver] send #{}: id={} value={:.1}", sent, unsafe { (*raw).id }, unsafe { (*raw).value });
         }
         // is_full チェック後なので必ず成功する
@@ -66,7 +73,7 @@ fn main() {
     }
 
     // 回収フェーズ: 残り全件をデバイスがcompleteするまで待って回収
-    while reclaimed < MSG_COUNT {
+    while reclaimed < msg_count {
         if let Some(buf) = driver_vq.get_buffer() {
             let _ = unsafe { Box::from_raw(buf.addr as *mut Message) };
             reclaimed += 1;
@@ -76,5 +83,5 @@ fn main() {
     }
 
     device.join().unwrap();
-    println!("done. reclaimed {}/{} buffers", reclaimed, MSG_COUNT);
+    println!("done. reclaimed {}/{} buffers", reclaimed, msg_count);
 }
