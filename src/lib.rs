@@ -4,6 +4,7 @@ pub const VIRTQ_DESC_F_WRITE: u16 = 1 << 1;
 pub const VIRTQ_DESC_F_AVAIL: u16 = 1 << 7;
 pub const VIRTQ_DESC_F_USED: u16 = 1 << 15;
 
+/// §2.8.13 pvirtq_desc
 #[repr(C)]
 pub struct VirtqDesc {
     pub addr: u64,
@@ -14,123 +15,113 @@ pub struct VirtqDesc {
 
 unsafe impl Send for VirtqDesc {}
 
-pub struct BufferElement {
-    pub addr: *const u64,
-    pub len: u32,
-    pub writable: bool,
-}
-
-/// ドライバ側: descriptor ringへのバッファ供給と回収を担う。
-/// place_buffer と get_buffer はドライバスレッドのみが呼ぶ。
+/// ドライバ側。descriptor ring へのバッファ供給と回収を担う。
+///
+/// バッファ id（= スロット番号 0..num）で各バッファを識別する。
+/// 呼び出し側は alloc_id でスロットを確保してバッファを準備し、
+/// place_buffer で available として公開する。
+/// get_used_id で used 済み id が返ったらバッファを回収・再利用する。
+///
+/// place_buffer / get_used_id はドライバスレッドのみが呼ぶ。
 pub struct DriverVirtq {
     num: usize,
     desc: *mut VirtqDesc,
-    free_head: u16,
-    driver_wrap: u16,   // Driver Ring Wrap Counter（初期値1）
-    next_id: u16,
-    used_head: u16,
-    used_wrap: u16,     // ドライバが used_head の周回を追跡するカウンタ（初期値1）
+    /// 次に available を書くリング位置（単調増加、% num でインデックス化）
+    avail_idx: u16,
+    /// Driver Ring Wrap Counter（§2.8.1、初期値 1）
+    driver_wrap: bool,
+    /// 次に used を確認するリング位置（単調増加）
+    used_idx: u16,
+    /// Device Ring Wrap Counter のドライバ側ミラー（§2.8.1）
+    device_wrap: bool,
+    /// 空き id のスタック（id = バッファスロット番号 0..num）
+    free_ids: Vec<u16>,
 }
 
 unsafe impl Send for DriverVirtq {}
 
 impl DriverVirtq {
     pub fn new(desc: *mut VirtqDesc, num: usize) -> Self {
+        let free_ids = (0..num as u16).rev().collect();
         DriverVirtq {
             num,
             desc,
-            free_head: 0,
-            driver_wrap: 1,
-            next_id: 0,
-            used_head: 0,
-            used_wrap: 1,
+            avail_idx: 0,
+            driver_wrap: true,
+            used_idx: 0,
+            device_wrap: true,
+            free_ids,
         }
     }
 
-    fn desc(&self, idx: u16) -> &mut VirtqDesc {
-        unsafe { &mut *self.desc.add(idx as usize) }
+    /// 空き id を1つ確保して返す。満杯なら None。
+    /// 返値の id に対応するバッファスロットを準備してから place_buffer を呼ぶ。
+    pub fn alloc_id(&mut self) -> Option<u16> {
+        self.free_ids.pop()
     }
 
-    /// リングが満杯（送信済み未回収がnumに達した）かどうかを返す。
-    pub fn is_full(&self) -> bool {
-        self.free_head.wrapping_sub(self.used_head) as usize >= self.num
+    fn desc_at(&self, linear_idx: u16) -> &mut VirtqDesc {
+        let slot = linear_idx as usize % self.num;
+        unsafe { &mut *self.desc.add(slot) }
     }
 
-    /// 仕様§2.8.21: バッファをdescriptor ringに供給する。
-    /// リングが満杯のときは `false` を返す（ノンブロッキング）。
-    /// 呼び出し側は満杯のとき get_buffer で回収してから再試行すること。
-    pub fn place_buffer(&mut self, buf: BufferElement) -> bool {
-        if self.is_full() {
-            return false;
-        }
-
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-
-        let idx = (self.free_head as usize % self.num) as u16;
-        let d = self.desc(idx);
-        d.addr = buf.addr as u64;
-        d.len = buf.len;
+    /// alloc_id で確保した id のバッファを available として公開する。
+    /// addr: バッファの物理/仮想アドレス、len: バイト数、writable: デバイスが書き込む場合 true。
+    pub fn place_buffer(&mut self, id: u16, addr: u64, len: u32, writable: bool) {
+        let d = self.desc_at(self.avail_idx);
+        d.addr = addr;
+        d.len = len;
         d.id = id;
 
-        // available descriptor は AVAIL != USED（片方のビットのみ）で表現する。
-        // AVAIL を Driver Ring Wrap Counter に合わせ、USED はその逆にする。
-        // これによりデバイスが used 化した状態（AVAIL == USED）と区別できる。
-        let mut flags: u16 = 0;
-        if buf.writable {
-            flags |= VIRTQ_DESC_F_WRITE;
-        }
-        if self.driver_wrap == 1 {
+        // §2.8.1: available は AVAIL=driver_wrap, USED=逆（AVAIL ≠ USED）
+        let mut flags = if writable { VIRTQ_DESC_F_WRITE } else { 0 };
+        if self.driver_wrap {
             flags |= VIRTQ_DESC_F_AVAIL;
         } else {
             flags |= VIRTQ_DESC_F_USED;
         }
-
         fence(Ordering::Release);
         d.flags = flags;
 
-        self.free_head = self.free_head.wrapping_add(1);
-        // free_head が num の倍数を跨ぐ（= リングを1周する）たびに wrap counter をトグル。
-        if self.free_head as usize % self.num == 0 {
-            self.driver_wrap ^= 1;
+        self.avail_idx = self.avail_idx.wrapping_add(1);
+        if self.avail_idx as usize % self.num == 0 {
+            self.driver_wrap = !self.driver_wrap;
         }
-        true
     }
 
-    /// 仕様§2.8.22: デバイスがused化したバッファを回収する。
-    /// used化されていなければNoneを返す（ノンブロッキング）。
-    pub fn get_buffer(&mut self) -> Option<BufferElement> {
-        let idx = (self.used_head as usize % self.num) as u16;
-        let d = self.desc(idx);
+    /// デバイスが used 化したバッファの id を1つ回収する。
+    /// used descriptor がなければ None（ノンブロッキング）。
+    /// 返値の id に対応するバッファスロットを再利用できる。
+    pub fn get_used_id(&mut self) -> Option<u16> {
+        let d = self.desc_at(self.used_idx);
         fence(Ordering::Acquire);
         let flags = d.flags;
         let used = (flags & VIRTQ_DESC_F_USED) != 0;
         let avail = (flags & VIRTQ_DESC_F_AVAIL) != 0;
-        let wrap = self.used_wrap == 1;
-        // used descriptor は AVAIL == USED == used_wrap
-        if used != wrap || avail != wrap {
+        // §2.8.1: used は AVAIL == USED == device_wrap
+        if used != self.device_wrap || avail != self.device_wrap {
             return None;
         }
-        let (addr, len) = (d.addr, d.len);
-        self.used_head = self.used_head.wrapping_add(1);
-        if self.used_head as usize % self.num == 0 {
-            self.used_wrap ^= 1;
+        let id = d.id;
+        self.free_ids.push(id);
+
+        self.used_idx = self.used_idx.wrapping_add(1);
+        if self.used_idx as usize % self.num == 0 {
+            self.device_wrap = !self.device_wrap;
         }
-        Some(BufferElement {
-            addr: addr as *const u64,
-            len,
-            writable: (flags & VIRTQ_DESC_F_WRITE) != 0,
-        })
+        Some(id)
     }
 }
 
-/// デバイス側: descriptor ringからavailableバッファを取り出し、処理完了を通知する。
-/// device_take_available と device_complete はデバイススレッドのみが呼ぶ。
+/// デバイス側。descriptor ring から available バッファを取り出し、完了を通知する。
+/// device_take_available / device_complete はデバイススレッドのみが呼ぶ。
 pub struct DeviceVirtq {
     num: usize,
     desc: *mut VirtqDesc,
+    /// 次に available を確認するリング位置
     next: u16,
-    wrap: bool, // Device Ring Wrap Counter（初期値true=1）
+    /// Device Ring Wrap Counter（§2.8.1、初期値 1）
+    wrap: bool,
 }
 
 unsafe impl Send for DeviceVirtq {}
@@ -140,37 +131,37 @@ impl DeviceVirtq {
         DeviceVirtq { num, desc, next: 0, wrap: true }
     }
 
-    fn desc(&self, idx: u16) -> &mut VirtqDesc {
+    fn desc_at(&self, idx: u16) -> &mut VirtqDesc {
         unsafe { &mut *self.desc.add(idx as usize) }
     }
 
-    /// 次のavailable descriptorを取り出す。available でなければ None（ノンブロッキング）。
-    pub fn device_take_available(&self) -> Option<(*const u64, u32)> {
-        let d = self.desc(self.next);
+    /// 次の available descriptor を取得する。なければ None（ノンブロッキング）。
+    /// 返値: (addr, len, id)
+    pub fn device_take_available(&self) -> Option<(u64, u32, u16)> {
+        let d = self.desc_at(self.next);
         fence(Ordering::Acquire);
         let flags = d.flags;
         let avail = (flags & VIRTQ_DESC_F_AVAIL) != 0;
         let used = (flags & VIRTQ_DESC_F_USED) != 0;
-        // available descriptor は AVAIL == Device Ring Wrap Counter かつ AVAIL != USED。
-        // used 化済み（AVAIL == USED）のスロットを誤検出しないよう両条件を確認する。
+        // §2.8.1: available は AVAIL=device_wrap かつ AVAIL ≠ USED
         if avail != self.wrap || avail == used {
             return None;
         }
-        Some((d.addr as *const u64, d.len))
+        Some((d.addr, d.len, d.id))
     }
 
-    /// 現在の next スロットをused完了にしてカウンタを進める。
+    /// 現在の next スロットを used 完了にしてカーソルを進める。
     /// device_take_available で取得済みのスロットに対して呼ぶ。
     pub fn device_complete(&mut self) {
-        let d = self.desc(self.next);
-        // 仕様§2.8.2: used descriptor は AVAIL == USED == Device Ring Wrap Counter。
-        // AVAIL/USED 両ビットを device wrap counter に上書きする。
+        let d = self.desc_at(self.next);
+        // §2.8.1: used は AVAIL == USED == device_wrap
         let mut flags = d.flags & !(VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
         if self.wrap {
             flags |= VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED;
         }
         fence(Ordering::Release);
         d.flags = flags;
+
         self.next += 1;
         if self.next as usize >= self.num {
             self.next = 0;
