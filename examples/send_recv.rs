@@ -1,5 +1,5 @@
 use std::thread;
-use virtio_ipc::{DeviceVirtq, DriverVirtq, VirtqDesc};
+use virtio_ipc::{device::DeviceVirtq, driver::DriverVirtq, VirtqDesc};
 
 const QUEUE_SIZE: usize = 64;
 const MSG_COUNT: usize = 1_000_000;
