@@ -1,6 +1,8 @@
-use std::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{Ordering, fence};
 
 use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, VirtqDesc};
+
+const FREE_LIST_END: u16 = u16::MAX;
 
 /// ドライバ側。descriptor ring へのバッファ供給と回収を担う。
 ///
@@ -10,7 +12,7 @@ use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, VirtqDesc
 /// get_used_id で used 済み id が返ったらバッファを回収・再利用する。
 ///
 /// place_buffer / get_used_id はドライバスレッドのみが呼ぶ。
-pub struct DriverVirtq {
+pub struct DriverVirtq<'a> {
     num: usize,
     desc: *mut VirtqDesc,
     /// 次に available を書くリング位置（単調増加、% num でインデックス化）
@@ -21,15 +23,22 @@ pub struct DriverVirtq {
     used_idx: u16,
     /// Device Ring Wrap Counter のドライバ側ミラー（§2.8.1）
     device_wrap: bool,
-    /// 空き id のスタック（id = バッファスロット番号 0..num）
-    free_ids: Vec<u16>,
+    free_next: &'a mut [u16],
+    free_head: u16,
 }
 
-unsafe impl Send for DriverVirtq {}
+unsafe impl Send for DriverVirtq<'_> {}
 
-impl DriverVirtq {
-    pub fn new(desc: *mut VirtqDesc, num: usize) -> Self {
-        let free_ids = (0..num as u16).rev().collect();
+impl<'a> DriverVirtq<'a> {
+    pub fn new(desc: *mut VirtqDesc, num: usize, free_next: &'a mut [u16]) -> Self {
+        assert_eq!(free_next.len(), num);
+        for (id, next) in free_next.iter_mut().enumerate() {
+            *next = if id + 1 < num {
+                id as u16 + 1
+            } else {
+                FREE_LIST_END
+            };
+        }
         DriverVirtq {
             num,
             desc,
@@ -37,14 +46,20 @@ impl DriverVirtq {
             driver_wrap: true,
             used_idx: 0,
             device_wrap: true,
-            free_ids,
+            free_next,
+            free_head: 0,
         }
     }
 
     /// 空き id を1つ確保して返す。満杯なら None。
     /// 返値の id に対応するバッファスロットを準備してから place_buffer を呼ぶ。
     pub fn alloc_id(&mut self) -> Option<u16> {
-        self.free_ids.pop()
+        if self.free_head == FREE_LIST_END {
+            return None;
+        }
+        let id = self.free_head;
+        self.free_head = self.free_next[id as usize];
+        Some(id)
     }
 
     fn desc_at(&self, linear_idx: u16) -> &mut VirtqDesc {
@@ -81,8 +96,8 @@ impl DriverVirtq {
     /// 返値の id に対応するバッファスロットを再利用できる。
     pub fn get_used_id(&mut self) -> Option<u16> {
         let d = self.desc_at(self.used_idx);
-        fence(Ordering::Acquire);
         let flags = d.flags;
+        fence(Ordering::Acquire);
         let used = (flags & VIRTQ_DESC_F_USED) != 0;
         let avail = (flags & VIRTQ_DESC_F_AVAIL) != 0;
         // §2.8.1: used は AVAIL == USED == device_wrap
@@ -90,7 +105,8 @@ impl DriverVirtq {
             return None;
         }
         let id = d.id;
-        self.free_ids.push(id);
+        self.free_next[id as usize] = self.free_head;
+        self.free_head = id;
 
         self.used_idx = self.used_idx.wrapping_add(1);
         if self.used_idx as usize % self.num == 0 {

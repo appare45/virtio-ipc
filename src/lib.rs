@@ -1,3 +1,5 @@
+#![no_std]
+
 pub const VIRTQ_DESC_F_WRITE: u16 = 1 << 1;
 pub const VIRTQ_DESC_F_AVAIL: u16 = 1 << 7;
 pub const VIRTQ_DESC_F_USED: u16 = 1 << 15;

@@ -82,7 +82,8 @@ fn main() {
     let device_vq = DeviceVirtq::new(desc_ptr as *mut VirtqDesc, QUEUE_SIZE);
     let device = thread::spawn(move || run_device(device_vq));
 
-    let driver_vq = DriverVirtq::new(desc_ptr as *mut VirtqDesc, QUEUE_SIZE);
+    let mut free_next = [0u16; QUEUE_SIZE];
+    let driver_vq = DriverVirtq::new(desc_ptr as *mut VirtqDesc, QUEUE_SIZE, &mut free_next);
     let pool_slice =
         unsafe { std::slice::from_raw_parts_mut(pool_ptr as *mut Message, QUEUE_SIZE) };
     run_driver(driver_vq, pool_slice);
