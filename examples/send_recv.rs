@@ -1,8 +1,10 @@
 use std::thread;
+use std::time::Duration;
+use rand::Rng;
 use virtio_ipc::{EventSuppress, Virtqueue, VirtqDesc, device::DeviceVirtq, driver::DriverVirtq};
 
 const QUEUE_SIZE: usize = 64;
-const MSG_COUNT: usize = 1_000_000;
+const MSG_COUNT: usize = 1_000;
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -12,18 +14,28 @@ struct Message {
 }
 
 fn run_device(mut device_vq: DeviceVirtq) {
+    let mut rng = rand::thread_rng();
     let mut received = 0usize;
+    let mut starved = false;
     while received < MSG_COUNT {
         let Some((addr, _len, _id)) = device_vq.device_take_available() else {
+            if !starved {
+                println!("[device] no buffer available! waiting for driver (received={})", received);
+                starved = true;
+            }
             std::hint::spin_loop();
             continue;
         };
+        starved = false;
         let msg = unsafe { &*(addr as *const Message) };
-        if received % 100_000 == 0 {
-            println!(
-                "[device] recv #{}: seq={} value={:.1}",
-                received, msg.seq, msg.value
-            );
+        println!(
+            "[device] recv #{}: seq={} value={:.1}",
+            received, msg.seq, msg.value
+        );
+        // ランダム遅延: 0〜15ms (時々速くなり、driverがバッファ待ちになる)
+        let delay_ms: u64 = rng.gen_range(0..15);
+        if delay_ms > 0 {
+            thread::sleep(Duration::from_millis(delay_ms));
         }
         device_vq.device_complete();
         received += 1;
@@ -35,6 +47,7 @@ fn run_driver(mut driver_vq: DriverVirtq, pool: &mut [Message]) {
     let mut sent = 0usize;
     let mut reclaimed = 0usize;
 
+    let mut rng = rand::thread_rng();
     while sent < MSG_COUNT || reclaimed < MSG_COUNT {
         while driver_vq.get_used_id().is_some() {
             reclaimed += 1;
@@ -42,6 +55,7 @@ fn run_driver(mut driver_vq: DriverVirtq, pool: &mut [Message]) {
 
         while sent < MSG_COUNT {
             let Some(id) = driver_vq.alloc_id() else {
+                println!("[driver] queue full! waiting for device to catch up (sent={} reclaimed={})", sent, reclaimed);
                 break;
             };
             pool[id as usize] = Message {
@@ -49,11 +63,14 @@ fn run_driver(mut driver_vq: DriverVirtq, pool: &mut [Message]) {
                 value: sent as f64 * 0.1,
             };
             let addr = &pool[id as usize] as *const Message as u64;
-            if sent % 100_000 == 0 {
-                println!(
-                    "[driver] send #{}: seq={} value={:.1}",
-                    sent, pool[id as usize].seq, pool[id as usize].value
-                );
+            println!(
+                "[driver] send #{}: seq={} value={:.1}",
+                sent, pool[id as usize].seq, pool[id as usize].value
+            );
+            // ランダム遅延: 0〜20ms (時々遅くなり、deviceがバッファ待ちになる)
+            let delay_ms: u64 = rng.gen_range(0..20);
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
             }
             driver_vq.place_buffer(id, addr, msg_size, false);
             sent += 1;
