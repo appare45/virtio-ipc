@@ -81,6 +81,26 @@ if let Some(id) = driver_vq.get_used_id() {
 
 詳細な使用例は [`examples/send_recv.rs`](examples/send_recv.rs) を参照してください。
 
+## ベンチマーク
+
+VirtIO 共有メモリ方式と Unix socket によるプロセス間通信のスループット比較です（`examples/bench_ipc.rs`）。
+
+**計測条件:** メッセージ数 100,000件 / メッセージサイズ 64 bytes / キューサイズ 256
+
+| 方式 | 合計時間 | スループット | 平均レイテンシ |
+|---|---|---|---|
+| VirtIO 共有メモリ | 2.6 ms | 38,285,279 msg/s | 0.026 µs/msg |
+| Unix socket | 29.3 ms | 3,410,086 msg/s | 0.293 µs/msg |
+
+**VirtIO は Unix socket の約 11 倍高速。**
+
+Unix socket は `write()`/`read()` のたびにシステムコールとカーネル内バッファコピーが発生するのに対し、
+VirtIO 共有メモリ方式はユーザー空間のデスクリプタリングを直接読み書きするためシステムコールが不要です。
+
+```sh
+cargo run --release --example bench_ipc
+```
+
 ## サンプルの実行
 
 ```sh
