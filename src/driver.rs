@@ -1,6 +1,6 @@
 use core::sync::atomic::{Ordering, fence};
 
-use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, VirtqDesc};
+use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, Virtqueue, VirtqDesc};
 
 const FREE_LIST_END: u16 = u16::MAX;
 
@@ -30,7 +30,13 @@ pub struct DriverVirtq<'a> {
 unsafe impl Send for DriverVirtq<'_> {}
 
 impl<'a> DriverVirtq<'a> {
-    pub fn new(desc: *mut VirtqDesc, num: usize, free_next: &'a mut [u16]) -> Self {
+    pub fn new<const N: usize>(vq: *mut Virtqueue<N>, free_next: &'a mut [u16]) -> Self {
+        let num = N;
+        let desc = unsafe { (*vq).desc_ring.as_mut_ptr() };
+        Self::from_raw(desc, num, free_next)
+    }
+
+    fn from_raw(desc: *mut VirtqDesc, num: usize, free_next: &'a mut [u16]) -> Self {
         assert_eq!(free_next.len(), num);
         for (id, next) in free_next.iter_mut().enumerate() {
             *next = if id + 1 < num {

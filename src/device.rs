@@ -1,6 +1,6 @@
 use core::sync::atomic::{Ordering, fence};
 
-use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VirtqDesc};
+use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, Virtqueue, VirtqDesc};
 
 pub struct DeviceVirtq {
     num: usize,
@@ -14,10 +14,10 @@ pub struct DeviceVirtq {
 unsafe impl Send for DeviceVirtq {}
 
 impl DeviceVirtq {
-    pub fn new(desc: *mut VirtqDesc, num: usize) -> Self {
+    pub fn new<const N: usize>(vq: *mut Virtqueue<N>) -> Self {
         DeviceVirtq {
-            num,
-            desc,
+            num: N,
+            desc: unsafe { (*vq).desc_ring.as_mut_ptr() },
             next: 0,
             wrap: true,
         }

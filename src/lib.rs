@@ -6,6 +6,7 @@ pub const VIRTQ_DESC_F_USED: u16 = 1 << 15;
 
 /// §2.8.13 pvirtq_desc
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VirtqDesc {
     pub addr: u64,
     pub len: u32,
@@ -13,7 +14,25 @@ pub struct VirtqDesc {
     pub flags: u16,
 }
 
-unsafe impl Send for VirtqDesc {}
+/// §2.8.14 pvirtq_event_suppress
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EventSuppress {
+    pub desc: u16,
+    pub flags: u16,
+}
+
+/// §2.8 Packed Virtqueue
+///
+/// - Descriptor Area: desc_ring (アライメント 16)
+/// - Device Area:     device_event_suppress (アライメント 4)
+/// - Driver Area:     driver_event_suppress (アライメント 4)
+#[repr(C)]
+pub struct Virtqueue<const QUEUE_SIZE: usize> {
+    pub desc_ring: [VirtqDesc; QUEUE_SIZE],
+    pub device_event_suppress: EventSuppress,
+    pub driver_event_suppress: EventSuppress,
+}
 
 pub mod device;
 pub mod driver;

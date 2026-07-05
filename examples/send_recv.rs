@@ -1,5 +1,5 @@
 use std::thread;
-use virtio_ipc::{VirtqDesc, device::DeviceVirtq, driver::DriverVirtq};
+use virtio_ipc::{EventSuppress, Virtqueue, VirtqDesc, device::DeviceVirtq, driver::DriverVirtq};
 
 const QUEUE_SIZE: usize = 64;
 const MSG_COUNT: usize = 1_000_000;
@@ -66,24 +66,27 @@ fn run_driver(mut driver_vq: DriverVirtq, pool: &mut [Message]) {
 }
 
 fn main() {
-    let mut desc_ring: Vec<VirtqDesc> = (0..QUEUE_SIZE)
-        .map(|_| VirtqDesc {
+    let suppress = EventSuppress { desc: 0, flags: 0 };
+    let mut vq: Box<Virtqueue<QUEUE_SIZE>> = Box::new(Virtqueue {
+        desc_ring: [VirtqDesc {
             addr: 0,
             len: 0,
             id: 0,
             flags: 0,
-        })
-        .collect();
+        }; QUEUE_SIZE],
+        device_event_suppress: suppress,
+        driver_event_suppress: suppress,
+    });
     let mut pool: Vec<Message> = vec![Message::default(); QUEUE_SIZE];
 
-    let desc_ptr = desc_ring.as_mut_ptr() as usize;
+    let vq_ptr = &mut *vq as *mut Virtqueue<QUEUE_SIZE> as usize;
     let pool_ptr = pool.as_mut_ptr() as usize;
 
-    let device_vq = DeviceVirtq::new(desc_ptr as *mut VirtqDesc, QUEUE_SIZE);
+    let device_vq = DeviceVirtq::new(vq_ptr as *mut Virtqueue<QUEUE_SIZE>);
     let device = thread::spawn(move || run_device(device_vq));
 
     let mut free_next = [0u16; QUEUE_SIZE];
-    let driver_vq = DriverVirtq::new(desc_ptr as *mut VirtqDesc, QUEUE_SIZE, &mut free_next);
+    let driver_vq = DriverVirtq::new(vq_ptr as *mut Virtqueue<QUEUE_SIZE>, &mut free_next);
     let pool_slice =
         unsafe { std::slice::from_raw_parts_mut(pool_ptr as *mut Message, QUEUE_SIZE) };
     run_driver(driver_vq, pool_slice);
