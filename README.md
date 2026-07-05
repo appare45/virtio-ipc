@@ -24,33 +24,40 @@ Driver ◀──get_used_id()──
 
 | 型 / 関数 | 役割 |
 |---|---|
+| `Virtqueue<N>` | 共有メモリレイアウト（Descriptor Area + Device Area + Driver Area） |
 | `VirtqDesc` | デスクリプタ 1 エントリ（addr / len / id / flags） |
-| `DriverVirtq::new(desc, num)` | ドライバ側キューの初期化 |
+| `EventSuppress` | 通知抑制構造体（§2.8.14） |
+| `DriverVirtq::new(vq, free_next)` | ドライバ側キューの初期化 |
 | `DriverVirtq::alloc_id()` | 空きバッファ id を確保（満杯なら `None`） |
 | `DriverVirtq::place_buffer(id, addr, len, writable)` | バッファを available として公開 |
 | `DriverVirtq::get_used_id()` | used 済みバッファの id を回収（ノンブロッキング） |
-| `DeviceVirtq::new(desc, num)` | デバイス側キューの初期化 |
+| `DeviceVirtq::new(vq)` | デバイス側キューの初期化 |
 | `DeviceVirtq::device_take_available()` | 次の available デスクリプタを取得（ノンブロッキング） |
 | `DeviceVirtq::device_complete()` | 処理完了を通知し used 状態にする |
 
 ## 使い方
 
 ```rust
-use virtio_ipc::{DriverVirtq, DeviceVirtq, VirtqDesc};
+use virtio_ipc::{EventSuppress, Virtqueue, VirtqDesc, driver::DriverVirtq, device::DeviceVirtq};
 
 const QUEUE_SIZE: usize = 64;
 
-// デスクリプタリングをヒープに確保
-let mut desc_ring: Vec<VirtqDesc> = (0..QUEUE_SIZE)
-    .map(|_| VirtqDesc { addr: 0, len: 0, id: 0, flags: 0 })
-    .collect();
+// Virtqueue（Descriptor Area + Device/Driver Area）をヒープに確保
+let suppress = EventSuppress { desc: 0, flags: 0 };
+let mut vq: Box<Virtqueue<QUEUE_SIZE>> = Box::new(Virtqueue {
+    desc_ring: [VirtqDesc { addr: 0, len: 0, id: 0, flags: 0 }; QUEUE_SIZE],
+    device_event_suppress: suppress,
+    driver_event_suppress: suppress,
+});
 
 // バッファプールを一括確保（id = インデックス、使い回す）
 let mut pool: Vec<MyBuffer> = vec![MyBuffer::default(); QUEUE_SIZE];
 
-// ドライバ側とデバイス側で同じリングを共有
-let mut driver_vq = DriverVirtq::new(desc_ring.as_mut_ptr(), QUEUE_SIZE);
-let mut device_vq = DeviceVirtq::new(desc_ring.as_mut_ptr(), QUEUE_SIZE);
+// ドライバ側とデバイス側で同じ Virtqueue を共有
+let vq_ptr = &mut *vq as *mut Virtqueue<QUEUE_SIZE>;
+let mut free_next = [0u16; QUEUE_SIZE];
+let mut driver_vq = DriverVirtq::new(vq_ptr, &mut free_next);
+let mut device_vq = DeviceVirtq::new(vq_ptr);
 
 // 送信（ドライバ側）
 if let Some(id) = driver_vq.alloc_id() {
@@ -86,6 +93,9 @@ cargo run --example send_recv
 
 | 実装箇所 | VirtIO 仕様 §2.8 |
 |---|---|
+| `Virtqueue<N>` 全体のレイアウト | §2.8 — Descriptor Area / Device Area / Driver Area の 3 パート構成 |
+| `VirtqDesc` | §2.8.13 — pvirtq_desc（addr / len / id / flags） |
+| `EventSuppress` | §2.8.14 — pvirtq_event_suppress |
 | `VIRTQ_DESC_F_AVAIL` / `VIRTQ_DESC_F_USED` ビット | §2.8.1 — Driver/Device Ring Wrap Counter に合わせて設定 |
 | `place_buffer` | §2.8.1 — available: AVAIL=driver_wrap, USED=逆（AVAIL ≠ USED） |
 | `device_complete` | §2.8.1 — used: AVAIL == USED == device_wrap |
@@ -98,7 +108,7 @@ cargo run --example send_recv
   これは実ハードウェアでデスクリプタリングとバッファが別領域に置かれる構造に対応しています。
 - `DriverVirtq` と `DeviceVirtq` はそれぞれ別スレッドで使用します。
   同期はデスクリプタの AVAIL/USED フラグとメモリバリア（`fence`）のみで行います。
-- プロセス間で使う場合は共有メモリ（`mmap` など）上にデスクリプタリングを配置してください。
+- プロセス間で使う場合は共有メモリ（`mmap` など）上に `Virtqueue<N>` を配置してください（[`examples/process_send_recv.rs`](examples/process_send_recv.rs) 参照）。
 - `DriverVirtq` は `unsafe` な生ポインタを内部で保持します。ライフタイム管理は呼び出し側の責任です。
 
 ## 今後の課題
@@ -107,7 +117,7 @@ cargo run --example send_recv
 
 現在 `VirtqDesc.flags` は通常の `u16` フィールドであり、ドライバスレッドとデバイススレッドが同時に読み書きするためデータ競合（未定義動作）が生じる。`fence` は操作の順序を与えるが、アクセス自体のアトミック性は保証しない。
 
-改善案: `flags` を `AtomicU16` に変更し、ペイロード（addr/len/id）を書いた後に `flags.store(new_flags, Ordering::Release)`、読み側は `flags.load(Ordering::Acquire)` とする。これはフラグをメモリバリアとして兼用する VirtIO 仕様 §2.8.1 の意図にも合致する。
+改善案: `VirtqDesc.flags` を `AtomicU16` に変更し、ペイロード（addr/len/id）を書いた後に `flags.store(new_flags, Ordering::Release)`、読み側は `flags.load(Ordering::Acquire)` とする。これはフラグをメモリバリアとして兼用する VirtIO 仕様 §2.8.1 の意図にも合致する。
 
 ### `DeviceVirtq.wrap` の変数名の明確化
 

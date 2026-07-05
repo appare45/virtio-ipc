@@ -1,6 +1,7 @@
 use core::sync::atomic::{Ordering, fence};
 
-use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, Virtqueue, VirtqDesc};
+#[allow(unused_imports)]
+use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, Virtqueue, VirtqDesc, vq_debug};
 
 pub struct DeviceVirtq {
     num: usize,
@@ -33,10 +34,19 @@ impl DeviceVirtq {
         fence(Ordering::Acquire);
         let avail = (flags & VIRTQ_DESC_F_AVAIL) != 0;
         let used = (flags & VIRTQ_DESC_F_USED) != 0;
+        vq_debug!(
+            "[device] device_take_available: next={} wrap={} desc flags={:#06x} (avail={} used={})",
+            self.next, self.wrap, flags, avail, used
+        );
         // §2.8.1: available は AVAIL=device_wrap かつ AVAIL ≠ USED
         if avail != self.wrap || avail == used {
+            vq_debug!("[device] device_take_available: no available descriptor");
             return None;
         }
+        vq_debug!(
+            "[device] device_take_available: found addr={:#x} len={} id={}",
+            d.addr, d.len, d.id
+        );
         Some((d.addr, d.len, d.id))
     }
 
@@ -46,14 +56,22 @@ impl DeviceVirtq {
         const WRAP_FLAGS: u16 = VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED;
         // wrap済みの場合はAVAIL, USEDを反転させる
         let wrap_bits = if self.wrap { WRAP_FLAGS } else { 0 };
-        let flags = (d.flags & !WRAP_FLAGS) | wrap_bits;
+        let new_flags = (d.flags & !WRAP_FLAGS) | wrap_bits;
+        vq_debug!(
+            "[device] device_complete: next={} wrap={} desc flags {:#06x} -> {:#06x}",
+            self.next, self.wrap, d.flags, new_flags
+        );
         fence(Ordering::Release);
-        d.flags = flags;
+        d.flags = new_flags;
 
         self.next += 1;
         if self.next as usize >= self.num {
             self.next = 0;
             self.wrap = !self.wrap;
         }
+        vq_debug!(
+            "[device] device_complete done: next={} wrap={}",
+            self.next, self.wrap
+        );
     }
 }

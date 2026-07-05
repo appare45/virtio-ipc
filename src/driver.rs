@@ -1,6 +1,7 @@
 use core::sync::atomic::{Ordering, fence};
 
-use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, Virtqueue, VirtqDesc};
+#[allow(unused_imports)]
+use crate::{VIRTQ_DESC_F_AVAIL, VIRTQ_DESC_F_USED, VIRTQ_DESC_F_WRITE, Virtqueue, VirtqDesc, vq_debug};
 
 const FREE_LIST_END: u16 = u16::MAX;
 
@@ -76,6 +77,10 @@ impl<'a> DriverVirtq<'a> {
     /// alloc_id で確保した id のバッファを available として公開する。
     /// addr: バッファの物理/仮想アドレス、len: バイト数、writable: デバイスが書き込む場合 true。
     pub fn place_buffer(&mut self, id: u16, addr: u64, len: u32, writable: bool) {
+        vq_debug!(
+            "[driver] place_buffer: avail_idx={} driver_wrap={} id={} addr={:#x} len={} writable={}",
+            self.avail_idx, self.driver_wrap, id, addr, len, writable
+        );
         let d = self.desc_at(self.avail_idx);
         d.addr = addr;
         d.len = len;
@@ -95,6 +100,11 @@ impl<'a> DriverVirtq<'a> {
         if self.avail_idx as usize % self.num == 0 {
             self.driver_wrap = !self.driver_wrap;
         }
+        vq_debug!(
+            "[driver] place_buffer done: desc[slot={}] flags={:#06x} -> avail_idx={} driver_wrap={}",
+            (self.avail_idx.wrapping_sub(1)) as usize % self.num,
+            flags, self.avail_idx, self.driver_wrap
+        );
     }
 
     /// デバイスが used 化したバッファの id を1つ回収する。
@@ -106,8 +116,15 @@ impl<'a> DriverVirtq<'a> {
         fence(Ordering::Acquire);
         let used = (flags & VIRTQ_DESC_F_USED) != 0;
         let avail = (flags & VIRTQ_DESC_F_AVAIL) != 0;
+        vq_debug!(
+            "[driver] get_used_id: used_idx={} device_wrap={} desc[slot={}] flags={:#06x} (avail={} used={})",
+            self.used_idx, self.device_wrap,
+            self.used_idx as usize % self.num,
+            flags, avail, used
+        );
         // §2.8.1: used は AVAIL == USED == device_wrap
         if used != self.device_wrap || avail != self.device_wrap {
+            vq_debug!("[driver] get_used_id: no used descriptor");
             return None;
         }
         let id = d.id;
@@ -118,6 +135,10 @@ impl<'a> DriverVirtq<'a> {
         if self.used_idx as usize % self.num == 0 {
             self.device_wrap = !self.device_wrap;
         }
+        vq_debug!(
+            "[driver] get_used_id done: id={} -> used_idx={} device_wrap={}",
+            id, self.used_idx, self.device_wrap
+        );
         Some(id)
     }
 }

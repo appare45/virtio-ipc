@@ -1,5 +1,18 @@
 #![no_std]
 
+#[cfg(feature = "debug-log")]
+macro_rules! vq_debug {
+    ($($arg:tt)*) => { ::log::debug!($($arg)*) };
+}
+
+#[cfg(not(feature = "debug-log"))]
+macro_rules! vq_debug {
+    ($($arg:tt)*) => {};
+}
+
+#[allow(unused_imports)]
+pub(crate) use vq_debug;
+
 pub const VIRTQ_DESC_F_WRITE: u16 = 1 << 1;
 pub const VIRTQ_DESC_F_AVAIL: u16 = 1 << 7;
 pub const VIRTQ_DESC_F_USED: u16 = 1 << 15;

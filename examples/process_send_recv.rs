@@ -8,6 +8,9 @@
 ///   [VQ_BYTES .. ..)  : Message × QUEUE_SIZE  (メッセージプール)
 use std::mem;
 use std::num::NonZeroUsize;
+use std::thread;
+use std::time::Duration;
+use rand::Rng;
 
 use nix::fcntl::OFlag;
 use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap, shm_open, shm_unlink};
@@ -17,7 +20,7 @@ use nix::unistd::{ForkResult, ftruncate, fork};
 use virtio_ipc::{Virtqueue, device::DeviceVirtq, driver::DriverVirtq};
 
 const QUEUE_SIZE: usize = 64;
-const MSG_COUNT: usize = 1_000_000;
+const MSG_COUNT: usize = 1_000;
 const SHM_NAME: &str = "/virtio_ipc_example";
 
 #[repr(C)]
@@ -35,21 +38,31 @@ fn run_device(vq_ptr: *mut Virtqueue<QUEUE_SIZE>) {
     let mut device_vq = DeviceVirtq::new(vq_ptr);
     let pool_ptr = unsafe { (vq_ptr as *mut u8).add(VQ_BYTES) } as *const Message;
 
+    let mut rng = rand::thread_rng();
+    let mut starved = false;
     let mut received = 0usize;
     while received < MSG_COUNT {
         let Some((_addr, _len, id)) = device_vq.device_take_available() else {
+            if !starved {
+                println!("[device pid={}] no buffer available! waiting for driver (received={})", nix::unistd::getpid(), received);
+                starved = true;
+            }
             std::hint::spin_loop();
             continue;
         };
+        starved = false;
         let msg = unsafe { &*pool_ptr.add(id as usize) };
-        if received % 100_000 == 0 {
-            println!(
-                "[device pid={}] recv #{}: seq={} value={:.1}",
-                nix::unistd::getpid(),
-                received,
-                msg.seq,
-                msg.value
-            );
+        println!(
+            "[device pid={}] recv #{}: seq={} value={:.1}",
+            nix::unistd::getpid(),
+            received,
+            msg.seq,
+            msg.value
+        );
+        // ランダム遅延: 0〜15ms (時々速くなり、driverがバッファ待ちになる)
+        let delay_ms: u64 = rng.gen_range(0..15);
+        if delay_ms > 0 {
+            thread::sleep(Duration::from_millis(delay_ms));
         }
         device_vq.device_complete();
         received += 1;
@@ -68,6 +81,7 @@ fn run_driver(vq_ptr: *mut Virtqueue<QUEUE_SIZE>) {
     let mut sent = 0usize;
     let mut reclaimed = 0usize;
 
+    let mut rng = rand::thread_rng();
     while sent < MSG_COUNT || reclaimed < MSG_COUNT {
         while driver_vq.get_used_id().is_some() {
             reclaimed += 1;
@@ -75,6 +89,7 @@ fn run_driver(vq_ptr: *mut Virtqueue<QUEUE_SIZE>) {
 
         while sent < MSG_COUNT {
             let Some(id) = driver_vq.alloc_id() else {
+                println!("[driver pid={}] queue full! waiting for device (sent={} reclaimed={})", nix::unistd::getpid(), sent, reclaimed);
                 break;
             };
             let slot = unsafe { &mut *pool_ptr.add(id as usize) };
@@ -83,14 +98,17 @@ fn run_driver(vq_ptr: *mut Virtqueue<QUEUE_SIZE>) {
                 value: sent as f64 * 0.1,
             };
             let addr = slot as *const Message as u64;
-            if sent % 100_000 == 0 {
-                println!(
-                    "[driver pid={}] send #{}: seq={} value={:.1}",
-                    nix::unistd::getpid(),
-                    sent,
-                    slot.seq,
-                    slot.value
-                );
+            println!(
+                "[driver pid={}] send #{}: seq={} value={:.1}",
+                nix::unistd::getpid(),
+                sent,
+                slot.seq,
+                slot.value
+            );
+            // ランダム遅延: 0〜20ms (時々遅くなり、deviceがバッファ待ちになる)
+            let delay_ms: u64 = rng.gen_range(0..20);
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
             }
             driver_vq.place_buffer(id, addr, msg_size, false);
             sent += 1;
